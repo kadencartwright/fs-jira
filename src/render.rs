@@ -69,7 +69,7 @@ pub fn render_issue_markdown(issue: &IssueData) -> String {
         out.push('\n');
     }
     if !issue.attachments.is_empty() {
-        out.push_str("\n");
+        out.push('\n');
         for attachment in &issue.attachments {
             out.push_str(&format!(
                 "- attachment: {} ({})\n",
@@ -241,7 +241,8 @@ fn normalize_iso_utc(raw: Option<&str>) -> Option<String> {
 }
 
 fn adf_to_markdown(value: &Value) -> String {
-    redact_secrets(&adf_to_markdown_inner(value).trim().to_string())
+    let markdown = adf_to_markdown_inner(value);
+    redact_secrets(markdown.trim())
 }
 
 fn adf_to_markdown_inner(value: &Value) -> String {

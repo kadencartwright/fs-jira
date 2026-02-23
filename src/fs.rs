@@ -3,6 +3,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::MutexGuard;
 use std::time::{Duration, UNIX_EPOCH};
 
 use fuser::{
@@ -170,13 +171,8 @@ impl JiraFuseFs {
     }
 
     fn project_for_inode(&self, ino: INodeNo) -> Option<String> {
-        if let Some(Node::Project { name }) = self
-            .state
-            .lock()
-            .expect("state mutex poisoned")
-            .nodes
-            .get(&ino)
-        {
+        let guard = self.state_guard();
+        if let Some(Node::Project { name }) = guard.nodes.get(&ino) {
             return Some(name.clone());
         }
 
@@ -215,20 +211,21 @@ impl JiraFuseFs {
             return Some(Node::TicketsIndex);
         }
 
-        self.state
-            .lock()
-            .expect("state mutex poisoned")
-            .nodes
-            .get(&ino)
-            .cloned()
+        self.state_guard().nodes.get(&ino).cloned()
     }
 
     fn upsert_node(&self, ino: INodeNo, node: Node) {
-        self.state
-            .lock()
-            .expect("state mutex poisoned")
-            .nodes
-            .insert(ino, node);
+        self.state_guard().nodes.insert(ino, node);
+    }
+
+    fn state_guard(&self) -> MutexGuard<'_, FsState> {
+        match self.state.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                logging::warn("recovering poisoned mutex: fs state");
+                poisoned.into_inner()
+            }
+        }
     }
 
     fn issue_exists_in_project(&self, project: &str, issue_key: &str) -> Result<bool, Errno> {
@@ -510,7 +507,7 @@ impl Filesystem for JiraFuseFs {
             return;
         };
 
-        if !issue_key.starts_with(&(project.clone() + "-")) {
+        if !issue_key.starts_with(&format!("{project}-")) {
             reply.error(Errno::ENOENT);
             return;
         }

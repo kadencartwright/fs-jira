@@ -14,6 +14,22 @@ Read-only Rust FUSE filesystem that exposes Jira issues as markdown files.
 cargo build
 ```
 
+## Quality Checks
+
+Run these before opening a PR:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-targets --all-features --locked
+```
+
+Optional API docs validation:
+
+```bash
+cargo doc --no-deps
+```
+
 ## Configure Jira
 
 Set required environment variables:

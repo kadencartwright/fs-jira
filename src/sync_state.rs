@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+use crate::logging;
 
 #[derive(Debug)]
 pub struct SyncState {
@@ -25,31 +27,25 @@ impl SyncState {
     }
 
     pub fn mark_sync_complete(&self) {
-        let mut guard = self.last_sync.lock().expect("last_sync mutex poisoned");
+        let mut guard = lock_or_recover(&self.last_sync, "last_sync");
         *guard = Some(Instant::now());
     }
 
     pub fn last_sync(&self) -> Option<Instant> {
-        *self.last_sync.lock().expect("last_sync mutex poisoned")
+        *lock_or_recover(&self.last_sync, "last_sync")
     }
 
     pub fn mark_full_sync_complete(&self) {
-        let mut guard = self
-            .last_full_sync
-            .lock()
-            .expect("last_full_sync mutex poisoned");
+        let mut guard = lock_or_recover(&self.last_full_sync, "last_full_sync");
         *guard = Some(Instant::now());
     }
 
     pub fn last_full_sync(&self) -> Option<Instant> {
-        *self
-            .last_full_sync
-            .lock()
-            .expect("last_full_sync mutex poisoned")
+        *lock_or_recover(&self.last_full_sync, "last_full_sync")
     }
 
     pub fn seconds_until_next_sync(&self) -> u64 {
-        let guard = self.last_sync.lock().expect("last_sync mutex poisoned");
+        let guard = lock_or_recover(&self.last_sync, "last_sync");
         match *guard {
             Some(last) => {
                 let elapsed = last.elapsed();
@@ -95,5 +91,15 @@ impl SyncState {
 
     pub fn is_sync_in_progress(&self) -> bool {
         self.sync_in_progress.load(Ordering::Relaxed)
+    }
+}
+
+fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, name: &'static str) -> MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            logging::warn(format!("recovering poisoned mutex: {}", name));
+            poisoned.into_inner()
+        }
     }
 }

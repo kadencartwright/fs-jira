@@ -10,12 +10,14 @@ use crate::logging;
 use crate::metrics::Metrics;
 
 #[derive(Debug, Clone)]
+/// Lightweight issue reference returned by listing APIs.
 pub struct IssueRef {
     pub key: String,
     pub updated: Option<String>,
 }
 
 #[derive(Debug, Clone)]
+/// Identity payload returned by Jira's `/myself` endpoint.
 pub struct JiraIdentity {
     pub account_id: Option<String>,
     pub display_name: Option<String>,
@@ -23,6 +25,7 @@ pub struct JiraIdentity {
 }
 
 #[derive(Debug, Clone)]
+/// Render-ready Jira comment payload.
 pub struct IssueComment {
     pub id: Option<String>,
     pub author_display_name: Option<String>,
@@ -31,12 +34,14 @@ pub struct IssueComment {
 }
 
 #[derive(Debug, Clone)]
+/// Metadata for a Jira issue attachment.
 pub struct IssueAttachment {
     pub id: String,
     pub filename: String,
 }
 
 #[derive(Debug, Clone)]
+/// Normalized Jira issue payload used by render and sync flows.
 pub struct IssueData {
     pub key: String,
     pub project: String,
@@ -62,6 +67,7 @@ pub struct IssueData {
 }
 
 #[derive(Debug, thiserror::Error)]
+/// Errors returned by [`JiraClient`].
 pub enum JiraError {
     #[error("jira request failed: {0}")]
     Request(#[from] reqwest::Error),
@@ -101,12 +107,9 @@ impl Limiter {
     }
 
     fn acquire(&self) -> Permit<'_> {
-        let mut current = self.in_flight.lock().expect("limiter mutex poisoned");
+        let mut current = lock_or_recover(&self.in_flight, "jira limiter in_flight");
         while *current >= self.max {
-            current = self
-                .cv
-                .wait(current)
-                .expect("limiter condvar wait failed unexpectedly");
+            current = wait_or_recover(&self.cv, current, "jira limiter wait");
         }
         *current += 1;
         Permit { limiter: self }
@@ -115,17 +118,14 @@ impl Limiter {
 
 impl Drop for Permit<'_> {
     fn drop(&mut self) {
-        let mut current = self
-            .limiter
-            .in_flight
-            .lock()
-            .expect("limiter mutex poisoned");
+        let mut current = lock_or_recover(&self.limiter.in_flight, "jira limiter in_flight");
         *current = current.saturating_sub(1);
         self.limiter.cv.notify_one();
     }
 }
 
 #[derive(Debug, Clone)]
+/// Blocking Jira API client with bounded retry and request concurrency.
 pub struct JiraClient {
     pub base_url: String,
     pub email: String,
@@ -137,10 +137,18 @@ pub struct JiraClient {
 }
 
 impl JiraClient {
+    /// Creates a Jira client with default metrics and retry settings.
+    ///
+    /// # Errors
+    /// Returns [`JiraError`] when URL normalization or HTTP client construction fails.
     pub fn new(base_url: String, email: String, api_token: String) -> Result<Self, JiraError> {
         Self::new_with_metrics(base_url, email, api_token, Arc::new(Metrics::new()))
     }
 
+    /// Creates a Jira client with caller-provided metrics.
+    ///
+    /// # Errors
+    /// Returns [`JiraError`] when URL normalization or HTTP client construction fails.
     pub fn new_with_metrics(
         base_url: String,
         email: String,
@@ -201,9 +209,16 @@ impl JiraClient {
             thread::sleep(wait);
         }
 
-        unreachable!("retry loop should always return");
+        Err(JiraError::Http {
+            status: reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            body: "retry loop exhausted unexpectedly".to_string(),
+        })
     }
 
+    /// Lists issue keys for a Jira project in key order.
+    ///
+    /// # Errors
+    /// Returns [`JiraError`] when request transport, HTTP status, or decode fails.
     pub fn list_project_issue_refs(&self, project: &str) -> Result<Vec<IssueRef>, JiraError> {
         let mut start_at: usize = 0;
         let mut next_page_token: Option<String> = None;
@@ -307,6 +322,10 @@ impl JiraClient {
         Ok(all)
     }
 
+    /// Fetches one Jira issue by key.
+    ///
+    /// # Errors
+    /// Returns [`JiraError`] when request transport, HTTP status, or decode fails.
     pub fn get_issue(&self, issue_key: &str) -> Result<IssueData, JiraError> {
         let url = format!("{}/rest/api/3/issue/{}", self.base_url, issue_key);
         let response = self.request_with_retry(|| {
@@ -382,6 +401,10 @@ impl JiraClient {
         })
     }
 
+    /// Executes a Jira JQL search and returns hydrated issue payloads.
+    ///
+    /// # Errors
+    /// Returns [`JiraError`] when request transport, HTTP status, or decode fails.
     pub fn search_issues_bulk(
         &self,
         jql: &str,
@@ -516,6 +539,10 @@ impl JiraClient {
         Ok(all)
     }
 
+    /// Fetches the authenticated Jira user.
+    ///
+    /// # Errors
+    /// Returns [`JiraError`] when request transport, HTTP status, or decode fails.
     pub fn get_myself(&self) -> Result<JiraIdentity, JiraError> {
         let url = format!("{}/rest/api/3/myself", self.base_url);
         let response = self.request_with_retry(|| {
@@ -542,6 +569,10 @@ impl JiraClient {
         })
     }
 
+    /// Lists project keys visible to the authenticated Jira user.
+    ///
+    /// # Errors
+    /// Returns [`JiraError`] when request transport, HTTP status, or decode fails.
     pub fn list_visible_projects(&self) -> Result<Vec<String>, JiraError> {
         let url = format!("{}/rest/api/3/project/search", self.base_url);
         let response = self.request_with_retry(|| {
@@ -607,6 +638,33 @@ fn retry_after_or_backoff(response: &Response, attempt: usize) -> Duration {
 
     let seconds = 1_u64 << attempt.min(4);
     Duration::from_secs(seconds)
+}
+
+fn lock_or_recover<'a, T>(mutex: &'a Mutex<T>, name: &'static str) -> std::sync::MutexGuard<'a, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            logging::warn(format!("recovering poisoned mutex: {}", name));
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn wait_or_recover<'a, T>(
+    cv: &Condvar,
+    guard: std::sync::MutexGuard<'a, T>,
+    name: &'static str,
+) -> std::sync::MutexGuard<'a, T> {
+    match cv.wait(guard) {
+        Ok(next) => next,
+        Err(poisoned) => {
+            logging::warn(format!(
+                "recovering poisoned mutex after condvar wait: {}",
+                name
+            ));
+            poisoned.into_inner()
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

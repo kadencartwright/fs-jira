@@ -2,14 +2,21 @@ pub mod persistent;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::jira::IssueRef;
+use crate::logging;
 use crate::metrics::Metrics;
 use persistent::{PersistentCache, TicketIndexRow};
 
+/// Batch row for issue markdown cache upserts.
+pub type IssueCacheRow = (String, Vec<u8>, Option<String>);
+/// Batch row for issue comments sidecar upserts.
+pub type IssueSidecarRow = (String, Vec<u8>, Vec<u8>, Option<String>);
+
 #[derive(Debug, Clone)]
+/// Cached value with TTL and source metadata.
 pub struct CacheEntry<T> {
     pub value: T,
     pub cached_at: Instant,
@@ -18,6 +25,7 @@ pub struct CacheEntry<T> {
 }
 
 #[derive(Debug, Clone)]
+/// Snapshot of project issue refs with staleness signal.
 pub struct ProjectIssuesSnapshot {
     pub issues: Vec<IssueRef>,
     pub is_stale: bool,
@@ -29,6 +37,7 @@ struct CachedIssue {
 }
 
 #[derive(Debug)]
+/// In-memory issue cache with optional SQLite persistence.
 pub struct InMemoryCache {
     project_ttl: Duration,
     issue_ttl: Duration,
@@ -39,6 +48,7 @@ pub struct InMemoryCache {
 }
 
 impl InMemoryCache {
+    /// Creates an in-memory cache without persistence.
     pub fn new(project_ttl: Duration, issue_ttl: Duration, metrics: Arc<Metrics>) -> Self {
         Self {
             project_ttl,
@@ -50,6 +60,10 @@ impl InMemoryCache {
         }
     }
 
+    /// Creates an in-memory cache backed by SQLite persistence.
+    ///
+    /// # Errors
+    /// Returns [`rusqlite::Error`] when opening or initializing persistence fails.
     pub fn with_persistence(
         project_ttl: Duration,
         issue_ttl: Duration,
@@ -66,6 +80,7 @@ impl InMemoryCache {
         })
     }
 
+    /// Gets project issues from cache or via `fetch`, then caches fresh values.
     pub fn get_project_issues<F, E>(&self, project: &str, fetch: F) -> Result<Vec<IssueRef>, E>
     where
         F: FnOnce() -> Result<Vec<IssueRef>, E>,
@@ -73,8 +88,7 @@ impl InMemoryCache {
         let now = Instant::now();
         if let Some(entry) = self
             .project_issues
-            .lock()
-            .expect("project cache mutex poisoned")
+            .lock_or_recover("project_issues")
             .get(project)
             .cloned()
         {
@@ -93,18 +107,17 @@ impl InMemoryCache {
             source_updated: None,
         };
         self.project_issues
-            .lock()
-            .expect("project cache mutex poisoned")
+            .lock_or_recover("project_issues")
             .insert(project.to_string(), entry);
         Ok(fresh)
     }
 
+    /// Returns a project issue snapshot with stale/fresh metadata.
     pub fn get_project_issues_snapshot(&self, project: &str) -> Option<ProjectIssuesSnapshot> {
         let now = Instant::now();
         let entry = self
             .project_issues
-            .lock()
-            .expect("project cache mutex poisoned")
+            .lock_or_recover("project_issues")
             .get(project)
             .cloned()?;
 
@@ -121,6 +134,7 @@ impl InMemoryCache {
         })
     }
 
+    /// Replaces project issue refs in the in-memory cache.
     pub fn upsert_project_issues(&self, project: &str, issues: Vec<IssueRef>) {
         let entry = CacheEntry {
             value: issues,
@@ -129,11 +143,11 @@ impl InMemoryCache {
             source_updated: None,
         };
         self.project_issues
-            .lock()
-            .expect("project cache mutex poisoned")
+            .lock_or_recover("project_issues")
             .insert(project.to_string(), entry);
     }
 
+    /// Returns issue markdown and serves stale values on refresh failure.
     pub fn get_issue_markdown_stale_safe<F, E>(
         &self,
         issue_key: &str,
@@ -146,8 +160,7 @@ impl InMemoryCache {
         let now = Instant::now();
         let existing = self
             .issue_markdown
-            .lock()
-            .expect("issue cache mutex poisoned")
+            .lock_or_recover("issue_markdown")
             .get(issue_key)
             .cloned();
 
@@ -170,8 +183,7 @@ impl InMemoryCache {
                         source_updated: issue.updated,
                     };
                     self.issue_markdown
-                        .lock()
-                        .expect("issue cache mutex poisoned")
+                        .lock_or_recover("issue_markdown")
                         .insert(issue_key.to_string(), hydrated);
                     self.metrics.inc_cache_hit();
                     return Ok(issue.markdown);
@@ -195,16 +207,14 @@ impl InMemoryCache {
 
         if let Some(mut entry) = self
             .issue_markdown
-            .lock()
-            .expect("issue cache mutex poisoned")
+            .lock_or_recover("issue_markdown")
             .get(issue_key)
             .cloned()
         {
             if entry.source_updated == fresh_updated {
                 entry.cached_at = now;
                 self.issue_markdown
-                    .lock()
-                    .expect("issue cache mutex poisoned")
+                    .lock_or_recover("issue_markdown")
                     .insert(issue_key.to_string(), entry.clone());
                 return Ok(entry.value.markdown);
             }
@@ -219,8 +229,7 @@ impl InMemoryCache {
             source_updated: fresh_updated.clone(),
         };
         self.issue_markdown
-            .lock()
-            .expect("issue cache mutex poisoned")
+            .lock_or_recover("issue_markdown")
             .insert(issue_key.to_string(), entry);
 
         if let Some(persistent) = &self.persistent {
@@ -230,44 +239,42 @@ impl InMemoryCache {
         Ok(fresh_markdown)
     }
 
+    /// Returns in-memory markdown length in bytes for one issue.
     pub fn cached_issue_len(&self, issue_key: &str) -> Option<u64> {
         self.issue_markdown
-            .lock()
-            .expect("issue cache mutex poisoned")
+            .lock_or_recover("issue_markdown")
             .get(issue_key)
             .map(|entry| entry.value.markdown.len() as u64)
     }
 
-    pub fn upsert_issue_direct(&self, issue_key: &str, markdown: Vec<u8>, updated: Option<String>) {
+    /// Upserts one issue payload into memory and persistence.
+    pub fn upsert_issue_direct(&self, issue_key: &str, markdown: &[u8], updated: Option<&str>) {
         let now = Instant::now();
         let entry = CacheEntry {
             value: CachedIssue {
-                markdown: markdown.clone(),
+                markdown: markdown.to_vec(),
             },
             cached_at: now,
             ttl: self.issue_ttl,
-            source_updated: updated.clone(),
+            source_updated: updated.map(ToString::to_string),
         };
         self.issue_markdown
-            .lock()
-            .expect("issue cache mutex poisoned")
+            .lock_or_recover("issue_markdown")
             .insert(issue_key.to_string(), entry);
 
         if let Some(persistent) = &self.persistent {
-            let _ = persistent.upsert_issue(issue_key, &markdown, updated.as_deref());
+            let _ = persistent.upsert_issue(issue_key, markdown, updated);
         }
     }
 
-    pub fn upsert_issues_batch(&self, issues: Vec<(String, Vec<u8>, Option<String>)>) -> usize {
+    /// Upserts a batch of issue payloads into memory and persistence.
+    pub fn upsert_issues_batch(&self, issues: &[IssueCacheRow]) -> usize {
         let now = Instant::now();
         let mut count = 0;
 
         {
-            let mut guard = self
-                .issue_markdown
-                .lock()
-                .expect("issue cache mutex poisoned");
-            for (issue_key, markdown, updated) in &issues {
+            let mut guard = self.issue_markdown.lock_or_recover("issue_markdown");
+            for (issue_key, markdown, updated) in issues {
                 let entry = CacheEntry {
                     value: CachedIssue {
                         markdown: markdown.clone(),
@@ -282,42 +289,44 @@ impl InMemoryCache {
         }
 
         if let Some(persistent) = &self.persistent {
-            let _ = persistent.upsert_issues_batch(&issues);
+            let _ = persistent.upsert_issues_batch(issues);
         }
 
         count
     }
 
-    pub fn upsert_issue_sidecars_batch(
-        &self,
-        sidecars: Vec<(String, Vec<u8>, Vec<u8>, Option<String>)>,
-    ) -> usize {
+    /// Upserts a batch of sidecar payloads into persistence.
+    pub fn upsert_issue_sidecars_batch(&self, sidecars: &[IssueSidecarRow]) -> usize {
         if let Some(persistent) = &self.persistent {
             return persistent
-                .upsert_issue_sidecars_batch(&sidecars)
+                .upsert_issue_sidecars_batch(sidecars)
                 .unwrap_or(0);
         }
         0
     }
 
+    /// Returns persisted sync cursor for a project when available.
     pub fn get_sync_cursor(&self, project: &str) -> Option<String> {
         self.persistent
             .as_ref()
             .and_then(|p| p.get_sync_cursor(project).ok().flatten())
     }
 
+    /// Writes persisted sync cursor for a project when persistence is enabled.
     pub fn set_sync_cursor(&self, project: &str, last_sync: &str) {
         if let Some(persistent) = &self.persistent {
             let _ = persistent.set_sync_cursor(project, last_sync);
         }
     }
 
+    /// Clears persisted sync cursor for a project when persistence is enabled.
     pub fn clear_sync_cursor(&self, project: &str) {
         if let Some(persistent) = &self.persistent {
             let _ = persistent.clear_sync_cursor(project);
         }
     }
 
+    /// Returns persisted issue count for a project prefix.
     pub fn cached_issue_count(&self, project_prefix: &str) -> usize {
         self.persistent
             .as_ref()
@@ -325,50 +334,74 @@ impl InMemoryCache {
             .unwrap_or(0)
     }
 
+    /// Reports whether persistence is configured.
     pub fn has_persistence(&self) -> bool {
         self.persistent.is_some()
     }
 
+    /// Lists persisted ticket index rows.
     pub fn list_ticket_index(&self, projects: &[String]) -> Option<Vec<TicketIndexRow>> {
         self.persistent
             .as_ref()
             .and_then(|p| p.list_ticket_index(projects).ok())
     }
 
+    /// Returns persisted issue markdown length in bytes.
     pub fn persistent_issue_len(&self, issue_key: &str) -> Option<u64> {
         self.persistent
             .as_ref()
             .and_then(|p| p.issue_markdown_len(issue_key).ok().flatten())
     }
 
+    /// Lists persisted project issue refs.
     pub fn list_project_issue_refs_from_persistence(&self, project: &str) -> Option<Vec<IssueRef>> {
         self.persistent
             .as_ref()
             .and_then(|p| p.list_project_issue_refs(project).ok())
     }
 
+    /// Returns persisted comments markdown sidecar bytes.
     pub fn persistent_comments_md(&self, issue_key: &str) -> Option<Vec<u8>> {
         self.persistent
             .as_ref()
             .and_then(|p| p.get_issue_comments_md(issue_key).ok().flatten())
     }
 
+    /// Returns persisted comments jsonl sidecar bytes.
     pub fn persistent_comments_jsonl(&self, issue_key: &str) -> Option<Vec<u8>> {
         self.persistent
             .as_ref()
             .and_then(|p| p.get_issue_comments_jsonl(issue_key).ok().flatten())
     }
 
+    /// Returns persisted comments markdown sidecar length in bytes.
     pub fn persistent_comments_md_len(&self, issue_key: &str) -> Option<u64> {
         self.persistent
             .as_ref()
             .and_then(|p| p.issue_comments_md_len(issue_key).ok().flatten())
     }
 
+    /// Returns persisted comments jsonl sidecar length in bytes.
     pub fn persistent_comments_jsonl_len(&self, issue_key: &str) -> Option<u64> {
         self.persistent
             .as_ref()
             .and_then(|p| p.issue_comments_jsonl_len(issue_key).ok().flatten())
+    }
+}
+
+trait MutexExt<T> {
+    fn lock_or_recover(&self, name: &'static str) -> MutexGuard<'_, T>;
+}
+
+impl<T> MutexExt<T> for Mutex<T> {
+    fn lock_or_recover(&self, name: &'static str) -> MutexGuard<'_, T> {
+        match self.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                logging::warn(format!("recovering poisoned mutex: {}", name));
+                poisoned.into_inner()
+            }
+        }
     }
 }
 

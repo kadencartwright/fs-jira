@@ -16,11 +16,11 @@ pub fn seed_project_listings(
     for project in projects {
         match jira.list_project_issue_refs(project) {
             Ok(items) => {
-                cache.upsert_project_issues(project, items.clone());
+                let count = items.len();
+                cache.upsert_project_issues(project, items);
                 logging::info(format!(
                     "seeded project listing for {} with {} issues",
-                    project,
-                    items.len()
+                    project, count
                 ));
                 seeded += 1;
             }
@@ -148,8 +148,8 @@ pub fn sync_issues(
                     })
                     .collect();
 
-                let cached = cache.upsert_issues_batch(to_cache);
-                let _ = cache.upsert_issue_sidecars_batch(sidecars);
+                let cached = cache.upsert_issues_batch(&to_cache);
+                let _ = cache.upsert_issue_sidecars_batch(&sidecars);
                 result.issues_cached += cached;
 
                 if let Some(latest) = issues.first().and_then(|i| i.updated.as_ref()) {
