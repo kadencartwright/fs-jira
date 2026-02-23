@@ -24,18 +24,39 @@ pub struct JiraIdentity {
 
 #[derive(Debug, Clone)]
 pub struct IssueComment {
+    pub id: Option<String>,
     pub author_display_name: Option<String>,
     pub body: Value,
     pub created: Option<String>,
 }
 
 #[derive(Debug, Clone)]
+pub struct IssueAttachment {
+    pub id: String,
+    pub filename: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct IssueData {
     pub key: String,
+    pub project: String,
+    pub issue_type: Option<String>,
     pub summary: Option<String>,
     pub status: Option<String>,
+    pub priority: Option<String>,
     pub assignee: Option<String>,
+    pub reporter: Option<String>,
+    pub labels: Vec<String>,
+    pub created: Option<String>,
     pub updated: Option<String>,
+    pub parent: Option<String>,
+    pub epic: Option<String>,
+    pub blocks: Vec<String>,
+    pub blocked_by: Vec<String>,
+    pub relates_to: Vec<String>,
+    pub due_at: Option<String>,
+    pub source_url: String,
+    pub attachments: Vec<IssueAttachment>,
     pub description: Value,
     pub comments: Vec<IssueComment>,
 }
@@ -294,7 +315,7 @@ impl JiraClient {
                 .basic_auth(&self.email, Some(&self.api_token))
                 .query(&[(
                     "fields",
-                    "summary,status,assignee,updated,description,comment",
+                    "summary,status,issuetype,priority,assignee,reporter,labels,created,updated,description,comment,parent,attachment,duedate,issuelinks",
                 )])
                 .send()
         })?;
@@ -313,6 +334,7 @@ impl JiraClient {
                 c.comments
                     .into_iter()
                     .map(|comment| IssueComment {
+                        id: comment.id,
                         author_display_name: comment.author.and_then(|a| a.display_name),
                         body: comment.body,
                         created: comment.created,
@@ -321,15 +343,177 @@ impl JiraClient {
             })
             .unwrap_or_default();
 
+        let project = issue_key
+            .split_once('-')
+            .map(|(project, _)| project.to_string())
+            .unwrap_or_else(|| "UNKNOWN".to_string());
+        let (blocks, blocked_by, relates_to) = categorize_links(payload.fields.issue_links.clone());
+
         Ok(IssueData {
             key: payload.key,
+            project,
+            issue_type: payload.fields.issue_type.and_then(|t| t.name),
             summary: payload.fields.summary,
             status: payload.fields.status.and_then(|s| s.name),
+            priority: payload.fields.priority.and_then(|p| p.name),
             assignee: payload.fields.assignee.and_then(|a| a.display_name),
+            reporter: payload.fields.reporter.and_then(|a| a.display_name),
+            labels: payload.fields.labels,
+            created: payload.fields.created,
             updated: payload.fields.updated,
+            parent: payload.fields.parent.and_then(|p| p.key),
+            epic: None,
+            blocks,
+            blocked_by,
+            relates_to,
+            due_at: payload.fields.due_date,
+            source_url: format!("{}/browse/{}", self.base_url, issue_key),
+            attachments: payload
+                .fields
+                .attachment
+                .into_iter()
+                .map(|a| IssueAttachment {
+                    id: a.id,
+                    filename: a.filename,
+                })
+                .collect(),
             description: payload.fields.description.unwrap_or(Value::Null),
             comments,
         })
+    }
+
+    pub fn search_issues_bulk(
+        &self,
+        jql: &str,
+        max_results: usize,
+    ) -> Result<Vec<IssueData>, JiraError> {
+        let mut all = Vec::new();
+        let mut start_at: usize = 0;
+        let mut next_page_token: Option<String> = None;
+
+        loop {
+            let url = format!("{}/rest/api/3/search/jql", self.base_url);
+            let response = self.request_with_retry(|| {
+                let mut query = vec![
+                    ("jql", jql.to_string()),
+                    (
+                        "fields",
+                        "summary,status,issuetype,priority,assignee,reporter,labels,created,updated,description,comment,parent,attachment,duedate,issuelinks".to_string(),
+                    ),
+                    ("maxResults", max_results.to_string()),
+                ];
+
+                if let Some(token) = &next_page_token {
+                    query.push(("nextPageToken", token.clone()));
+                } else {
+                    query.push(("startAt", start_at.to_string()));
+                }
+
+                self.http
+                    .get(&url)
+                    .basic_auth(&self.email, Some(&self.api_token))
+                    .query(&query)
+                    .send()
+            })?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().unwrap_or_default();
+                return Err(JiraError::Http { status, body });
+            }
+
+            let body = response.text()?;
+            let payload: BulkSearchResponse = serde_json::from_str(&body).map_err(|source| {
+                logging::warn(format!("failed decoding bulk search response: {}", source));
+                JiraError::Decode {
+                    source,
+                    body: body.chars().take(500).collect(),
+                }
+            })?;
+
+            let page_issues = payload.take_issues();
+            let page_count = page_issues.len();
+
+            for issue in page_issues {
+                let comments = issue
+                    .fields
+                    .comment
+                    .map(|c| {
+                        c.comments
+                            .into_iter()
+                            .map(|comment| IssueComment {
+                                id: comment.id,
+                                author_display_name: comment.author.and_then(|a| a.display_name),
+                                body: comment.body,
+                                created: comment.created,
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                let issue_key = issue.key.clone();
+                let project = issue_key
+                    .split_once('-')
+                    .map(|(project, _)| project.to_string())
+                    .unwrap_or_else(|| "UNKNOWN".to_string());
+                let (blocks, blocked_by, relates_to) =
+                    categorize_links(issue.fields.issue_links.clone());
+
+                all.push(IssueData {
+                    key: issue_key.clone(),
+                    project,
+                    issue_type: issue.fields.issue_type.and_then(|t| t.name),
+                    summary: issue.fields.summary,
+                    status: issue.fields.status.and_then(|s| s.name),
+                    priority: issue.fields.priority.and_then(|p| p.name),
+                    assignee: issue.fields.assignee.and_then(|a| a.display_name),
+                    reporter: issue.fields.reporter.and_then(|a| a.display_name),
+                    labels: issue.fields.labels,
+                    created: issue.fields.created,
+                    updated: issue.fields.updated.clone(),
+                    parent: issue.fields.parent.and_then(|p| p.key),
+                    epic: None,
+                    blocks,
+                    blocked_by,
+                    relates_to,
+                    due_at: issue.fields.due_date,
+                    source_url: format!("{}/browse/{}", self.base_url, issue_key),
+                    attachments: issue
+                        .fields
+                        .attachment
+                        .into_iter()
+                        .map(|a| IssueAttachment {
+                            id: a.id,
+                            filename: a.filename,
+                        })
+                        .collect(),
+                    description: issue.fields.description.unwrap_or(Value::Null),
+                    comments,
+                });
+            }
+
+            if let Some(token) = payload.next_page_token {
+                if token.is_empty() || payload.is_last == Some(true) {
+                    break;
+                }
+                next_page_token = Some(token);
+                continue;
+            }
+
+            start_at += page_count;
+            if let Some(total) = payload.total {
+                if start_at >= total {
+                    break;
+                }
+                continue;
+            }
+
+            if payload.is_last.unwrap_or(true) || page_count == 0 {
+                break;
+            }
+        }
+
+        Ok(all)
     }
 
     pub fn get_myself(&self) -> Result<JiraIdentity, JiraError> {
@@ -463,42 +647,177 @@ struct SearchFields {
 }
 
 #[derive(Debug, Deserialize)]
-struct IssueResponse {
+#[serde(rename_all = "camelCase")]
+struct BulkSearchResponse {
+    #[serde(rename = "maxResults", default)]
+    _max_results: Option<usize>,
+    #[serde(default)]
+    total: Option<usize>,
+    #[serde(rename = "isLast", default)]
+    is_last: Option<bool>,
+    #[serde(rename = "nextPageToken", default)]
+    next_page_token: Option<String>,
+    #[serde(default)]
+    issues: Vec<BulkSearchIssue>,
+    #[serde(default)]
+    values: Vec<BulkSearchIssue>,
+}
+
+impl BulkSearchResponse {
+    fn take_issues(&self) -> Vec<BulkSearchIssue> {
+        if !self.issues.is_empty() {
+            return self.issues.clone();
+        }
+        self.values.clone()
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct BulkSearchIssue {
     key: String,
     fields: IssueFields,
 }
 
 #[derive(Debug, Deserialize)]
+struct IssueResponse {
+    key: String,
+    fields: IssueFields,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 struct IssueFields {
     summary: Option<String>,
     status: Option<StatusObj>,
+    #[serde(rename = "issuetype")]
+    issue_type: Option<IssueTypeObj>,
+    priority: Option<PriorityObj>,
     assignee: Option<UserObj>,
+    reporter: Option<UserObj>,
+    #[serde(default)]
+    labels: Vec<String>,
+    created: Option<String>,
     updated: Option<String>,
     description: Option<Value>,
     comment: Option<CommentContainer>,
+    parent: Option<ParentIssueRef>,
+    #[serde(default)]
+    attachment: Vec<AttachmentObj>,
+    #[serde(rename = "duedate")]
+    due_date: Option<String>,
+    #[serde(rename = "issuelinks", default)]
+    issue_links: Vec<IssueLinkObj>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct StatusObj {
     name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
+struct IssueTypeObj {
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct PriorityObj {
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct UserObj {
     display_name: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct CommentContainer {
     comments: Vec<CommentObj>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct CommentObj {
+    id: Option<String>,
     author: Option<UserObj>,
     body: Value,
     created: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct ParentIssueRef {
+    key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct AttachmentObj {
+    id: String,
+    filename: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct IssueLinkObj {
+    #[serde(rename = "type")]
+    link_type: Option<IssueLinkTypeObj>,
+    #[serde(rename = "outwardIssue")]
+    outward_issue: Option<LinkedIssueObj>,
+    #[serde(rename = "inwardIssue")]
+    inward_issue: Option<LinkedIssueObj>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct IssueLinkTypeObj {
+    inward: Option<String>,
+    outward: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct LinkedIssueObj {
+    key: String,
+}
+
+fn categorize_links(links: Vec<IssueLinkObj>) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let mut blocks = Vec::new();
+    let mut blocked_by = Vec::new();
+    let mut relates_to = Vec::new();
+
+    for link in links {
+        if let Some(outward) = link.outward_issue {
+            let relation = link
+                .link_type
+                .as_ref()
+                .and_then(|t| t.outward.clone().or_else(|| t.name.clone()))
+                .unwrap_or_else(|| "relates to".to_string())
+                .to_lowercase();
+            if relation.contains("block") {
+                blocks.push(outward.key);
+            } else {
+                relates_to.push(outward.key);
+            }
+        }
+
+        if let Some(inward) = link.inward_issue {
+            let relation = link
+                .link_type
+                .as_ref()
+                .and_then(|t| t.inward.clone().or_else(|| t.name.clone()))
+                .unwrap_or_else(|| "relates to".to_string())
+                .to_lowercase();
+            if relation.contains("block") {
+                blocked_by.push(inward.key);
+            } else {
+                relates_to.push(inward.key);
+            }
+        }
+    }
+
+    blocks.sort();
+    blocks.dedup();
+    blocked_by.sort();
+    blocked_by.dedup();
+    relates_to.sort();
+    relates_to.dedup();
+
+    (blocks, blocked_by, relates_to)
 }
 
 #[derive(Debug, Deserialize)]

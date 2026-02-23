@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::jira::IssueRef;
 use crate::metrics::Metrics;
-use persistent::PersistentCache;
+use persistent::{PersistentCache, TicketIndexRow};
 
 #[derive(Debug, Clone)]
 pub struct CacheEntry<T> {
@@ -236,6 +236,139 @@ impl InMemoryCache {
             .expect("issue cache mutex poisoned")
             .get(issue_key)
             .map(|entry| entry.value.markdown.len() as u64)
+    }
+
+    pub fn upsert_issue_direct(&self, issue_key: &str, markdown: Vec<u8>, updated: Option<String>) {
+        let now = Instant::now();
+        let entry = CacheEntry {
+            value: CachedIssue {
+                markdown: markdown.clone(),
+            },
+            cached_at: now,
+            ttl: self.issue_ttl,
+            source_updated: updated.clone(),
+        };
+        self.issue_markdown
+            .lock()
+            .expect("issue cache mutex poisoned")
+            .insert(issue_key.to_string(), entry);
+
+        if let Some(persistent) = &self.persistent {
+            let _ = persistent.upsert_issue(issue_key, &markdown, updated.as_deref());
+        }
+    }
+
+    pub fn upsert_issues_batch(&self, issues: Vec<(String, Vec<u8>, Option<String>)>) -> usize {
+        let now = Instant::now();
+        let mut count = 0;
+
+        {
+            let mut guard = self
+                .issue_markdown
+                .lock()
+                .expect("issue cache mutex poisoned");
+            for (issue_key, markdown, updated) in &issues {
+                let entry = CacheEntry {
+                    value: CachedIssue {
+                        markdown: markdown.clone(),
+                    },
+                    cached_at: now,
+                    ttl: self.issue_ttl,
+                    source_updated: updated.clone(),
+                };
+                guard.insert(issue_key.clone(), entry);
+                count += 1;
+            }
+        }
+
+        if let Some(persistent) = &self.persistent {
+            let _ = persistent.upsert_issues_batch(&issues);
+        }
+
+        count
+    }
+
+    pub fn upsert_issue_sidecars_batch(
+        &self,
+        sidecars: Vec<(String, Vec<u8>, Vec<u8>, Option<String>)>,
+    ) -> usize {
+        if let Some(persistent) = &self.persistent {
+            return persistent
+                .upsert_issue_sidecars_batch(&sidecars)
+                .unwrap_or(0);
+        }
+        0
+    }
+
+    pub fn get_sync_cursor(&self, project: &str) -> Option<String> {
+        self.persistent
+            .as_ref()
+            .and_then(|p| p.get_sync_cursor(project).ok().flatten())
+    }
+
+    pub fn set_sync_cursor(&self, project: &str, last_sync: &str) {
+        if let Some(persistent) = &self.persistent {
+            let _ = persistent.set_sync_cursor(project, last_sync);
+        }
+    }
+
+    pub fn clear_sync_cursor(&self, project: &str) {
+        if let Some(persistent) = &self.persistent {
+            let _ = persistent.clear_sync_cursor(project);
+        }
+    }
+
+    pub fn cached_issue_count(&self, project_prefix: &str) -> usize {
+        self.persistent
+            .as_ref()
+            .and_then(|p| p.cached_issue_count(project_prefix).ok())
+            .unwrap_or(0)
+    }
+
+    pub fn has_persistence(&self) -> bool {
+        self.persistent.is_some()
+    }
+
+    pub fn list_ticket_index(&self, projects: &[String]) -> Option<Vec<TicketIndexRow>> {
+        self.persistent
+            .as_ref()
+            .and_then(|p| p.list_ticket_index(projects).ok())
+    }
+
+    pub fn persistent_issue_len(&self, issue_key: &str) -> Option<u64> {
+        self.persistent
+            .as_ref()
+            .and_then(|p| p.issue_markdown_len(issue_key).ok().flatten())
+    }
+
+    pub fn list_project_issue_refs_from_persistence(&self, project: &str) -> Option<Vec<IssueRef>> {
+        self.persistent
+            .as_ref()
+            .and_then(|p| p.list_project_issue_refs(project).ok())
+    }
+
+    pub fn persistent_comments_md(&self, issue_key: &str) -> Option<Vec<u8>> {
+        self.persistent
+            .as_ref()
+            .and_then(|p| p.get_issue_comments_md(issue_key).ok().flatten())
+    }
+
+    pub fn persistent_comments_jsonl(&self, issue_key: &str) -> Option<Vec<u8>> {
+        self.persistent
+            .as_ref()
+            .and_then(|p| p.get_issue_comments_jsonl(issue_key).ok().flatten())
+    }
+
+    pub fn persistent_comments_md_len(&self, issue_key: &str) -> Option<u64> {
+        self.persistent
+            .as_ref()
+            .and_then(|p| p.issue_comments_md_len(issue_key).ok().flatten())
+    }
+
+    pub fn persistent_comments_jsonl_len(&self, issue_key: &str) -> Option<u64> {
+        self.persistent
+            .as_ref()
+            .and_then(|p| p.issue_comments_jsonl_len(issue_key).ok().flatten())
     }
 }
 

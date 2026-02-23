@@ -4,4 +4,5 @@ pub mod jira;
 pub mod logging;
 pub mod metrics;
 pub mod render;
+pub mod sync_state;
 pub mod warmup;
