@@ -18,6 +18,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Service artifacts sanity check
+        run: |
+          test -f deploy/systemd/fs-jira.service.tmpl
+          test -f deploy/launchd/com.fs-jira.mount.plist.tmpl
+          grep -q '^service-install' Justfile
+          grep -q '^service-enable' Justfile
+          grep -q '^service-uninstall' Justfile
+
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfuse3-dev pkg-config

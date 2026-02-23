@@ -1,0 +1,13 @@
+[Unit]
+Description=fs-jira FUSE mount
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=__BIN_PATH__ --config __CONFIG_PATH__ __MOUNTPOINT__
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

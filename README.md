@@ -167,6 +167,77 @@ Notes:
 - Workspace directory listings serve cached results immediately.
 - `logging.debug = true` enables verbose debug logs for refresh/retry/cache flow.
 
+## Auto-start Services
+
+`fs-jira` can auto-mount at login with a single per-user service instance:
+
+- Linux: `systemd --user` unit `fs-jira.service`
+- macOS: launchd LaunchAgent `com.fs-jira.mount`
+
+Default service mountpoint is `~/fs-jira`.
+
+Prerequisites:
+
+1. Binary is installed and on `PATH`: `just install`
+2. Config exists and is valid at one of:
+   - `$XDG_CONFIG_HOME/fs-jira/config.toml`
+   - `~/.config/fs-jira/config.toml`
+
+Install service files:
+
+```bash
+just service-install
+```
+
+Optional explicit paths:
+
+```bash
+just service-install ~/fs-jira /path/to/config.toml
+```
+
+Enable/start at login:
+
+```bash
+just service-enable
+```
+
+Check status:
+
+```bash
+just service-status
+```
+
+View logs:
+
+```bash
+just service-logs
+```
+
+Stop without uninstall:
+
+```bash
+just service-stop
+```
+
+Disable autostart:
+
+```bash
+just service-disable
+```
+
+Remove managed service files:
+
+```bash
+just service-uninstall
+```
+
+Troubleshooting:
+
+- `config file not found`: create config with `just install` or pass explicit path to `just service-install <mountpoint> <config_path>`.
+- `fs-jira binary not found`: run `just install` and ensure your shell `PATH` includes Cargo install location.
+- stale mountpoint: unmount manually, then restart service.
+- prefer stable mount paths (like `~/fs-jira`) for services; avoid `/tmp` for login-persistent mounts.
+
 ## Unmount
 
 Linux:
