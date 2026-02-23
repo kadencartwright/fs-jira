@@ -5,13 +5,13 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        canvas: "#f3f5f7",
-        panel: "#ffffff",
-        ink: "#0f1720",
-        muted: "#5b6673",
-        accent: "#0f766e",
-        warn: "#b45309",
-        danger: "#b91c1c",
+        canvas: "#070b12",
+        panel: "#111827",
+        ink: "#e6edf8",
+        muted: "#9aa8bd",
+        accent: "#14b8a6",
+        warn: "#f59e0b",
+        danger: "#ef4444",
       },
     },
   },

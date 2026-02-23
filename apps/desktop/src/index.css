@@ -3,7 +3,7 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: light;
+  color-scheme: dark;
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 
@@ -13,4 +13,6 @@
 
 body {
   margin: 0;
+  background-color: #070b12;
+  color: #e6edf8;
 }

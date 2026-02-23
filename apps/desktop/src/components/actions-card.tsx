@@ -44,13 +44,13 @@ export function ActionsCard({ disabled, onResync, onFullResync }: Props) {
 
   return (
     <>
-      <section className="rounded-xl border border-slate-200 bg-panel p-4 shadow-sm">
-        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-muted">
+      <section className="rounded-xl border border-slate-700/80 bg-slate-900/70 p-4 shadow-sm shadow-black/20">
+        <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-400">
           Actions
         </h2>
         <div className="flex flex-wrap gap-2">
           <button
-            className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+            className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
             disabled={disabled || busy}
             onClick={() => {
               void run(onResync);
@@ -60,7 +60,7 @@ export function ActionsCard({ disabled, onResync, onFullResync }: Props) {
             Resync
           </button>
           <button
-            className="rounded-md bg-danger px-3 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:bg-slate-300"
+            className="rounded-md bg-danger px-3 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
             disabled={disabled || busy}
             onClick={() => {
               setDialogOpen(true);
@@ -70,7 +70,7 @@ export function ActionsCard({ disabled, onResync, onFullResync }: Props) {
             Full Resync
           </button>
         </div>
-        {message ? <p className="mt-3 text-xs text-muted">{message}</p> : null}
+        {message ? <p className="mt-3 text-xs text-slate-400">{message}</p> : null}
       </section>
 
       <FullResyncDialog
