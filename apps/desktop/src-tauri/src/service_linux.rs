@@ -55,6 +55,34 @@ pub fn probe_service() -> Result<ServiceProbe, ServiceProbeError> {
     })
 }
 
+pub fn start_service() -> Result<(), ServiceProbeError> {
+    let mut command = Command::new("systemctl");
+    command
+        .args(["--user", "start", SYSTEMD_UNIT_NAME])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = run_command_with_timeout(command, Duration::from_secs(5))?;
+    if output.status_ok {
+        Ok(())
+    } else {
+        let kind = classify_probe_failure(&output.stderr);
+        let details = if output.stderr.is_empty() {
+            output.stdout
+        } else {
+            output.stderr
+        };
+        Err(ServiceProbeError {
+            kind,
+            message: format!(
+                "failed to start {} via systemd --user: {}",
+                SYSTEMD_UNIT_NAME, details
+            ),
+        })
+    }
+}
+
 fn resolve_unit_path() -> PathBuf {
     if let Some(xdg_config_home) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg_config_home)

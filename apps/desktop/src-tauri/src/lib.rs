@@ -65,6 +65,21 @@ struct TriggerSyncResultDto {
     reason: TriggerReason,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StartServiceReason {
+    Started,
+    AlreadyRunning,
+    ServiceNotInstalled,
+    StartFailed,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct StartServiceResultDto {
+    started: bool,
+    reason: StartServiceReason,
+}
+
 #[tauri::command]
 fn get_app_status(app: AppHandle) -> Result<AppStatusDto, String> {
     let status = compute_status()?;
@@ -119,6 +134,41 @@ fn trigger_sync(app: AppHandle, kind: String) -> Result<TriggerSyncResultDto, St
         Err(_) => TriggerSyncResultDto {
             accepted: false,
             reason: TriggerReason::TriggerWriteFailed,
+        },
+    };
+
+    if let Ok(next_status) = compute_status() {
+        update_tray_tooltip(&app, &next_status);
+    }
+
+    Ok(response)
+}
+
+#[tauri::command]
+fn start_user_service(app: AppHandle) -> Result<StartServiceResultDto, String> {
+    let status = compute_status()?;
+    if status.service_running {
+        return Ok(StartServiceResultDto {
+            started: false,
+            reason: StartServiceReason::AlreadyRunning,
+        });
+    }
+
+    if !status.service_installed {
+        return Ok(StartServiceResultDto {
+            started: false,
+            reason: StartServiceReason::ServiceNotInstalled,
+        });
+    }
+
+    let response = match start_service() {
+        Ok(()) => StartServiceResultDto {
+            started: true,
+            reason: StartServiceReason::Started,
+        },
+        Err(_) => StartServiceResultDto {
+            started: false,
+            reason: StartServiceReason::StartFailed,
         },
     };
 
@@ -234,13 +284,31 @@ fn probe_service() -> Result<ServiceProbe, ServiceProbeError> {
     service_linux::probe_service()
 }
 
+#[cfg(target_os = "linux")]
+fn start_service() -> Result<(), ServiceProbeError> {
+    service_linux::start_service()
+}
+
 #[cfg(target_os = "macos")]
 fn probe_service() -> Result<ServiceProbe, ServiceProbeError> {
     service_macos::probe_service()
 }
 
+#[cfg(target_os = "macos")]
+fn start_service() -> Result<(), ServiceProbeError> {
+    service_macos::start_service()
+}
+
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn probe_service() -> Result<ServiceProbe, ServiceProbeError> {
+    Err(ServiceProbeError {
+        kind: ServiceProbeErrorKind::NotInstalled,
+        message: "unsupported platform".to_string(),
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn start_service() -> Result<(), ServiceProbeError> {
     Err(ServiceProbeError {
         kind: ServiceProbeErrorKind::NotInstalled,
         message: "unsupported platform".to_string(),
@@ -259,13 +327,20 @@ fn update_tray_tooltip(app: &AppHandle, status: &AppStatusDto) {
 
 fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
     let open_item = MenuItem::with_id(app, "open", "Open", true, None::<&str>)?;
+    let start_item = MenuItem::with_id(app, "start_service", "Start Service", true, None::<&str>)?;
     let resync_item = MenuItem::with_id(app, "resync", "Resync", true, None::<&str>)?;
     let full_resync_item =
         MenuItem::with_id(app, "full_resync", "Full Resync", true, None::<&str>)?;
     let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&open_item, &resync_item, &full_resync_item, &quit_item],
+        &[
+            &open_item,
+            &start_item,
+            &resync_item,
+            &full_resync_item,
+            &quit_item,
+        ],
     )?;
 
     TrayIconBuilder::with_id("main")
@@ -280,6 +355,9 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             "resync" => {
                 let _ = trigger_sync(app.clone(), "resync".to_string());
+            }
+            "start_service" => {
+                let _ = start_user_service(app.clone());
             }
             "full_resync" => {
                 let _ = trigger_sync(app.clone(), "full_resync".to_string());
@@ -303,7 +381,11 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_app_status, trigger_sync])
+        .invoke_handler(tauri::generate_handler![
+            get_app_status,
+            trigger_sync,
+            start_user_service
+        ])
         .run(tauri::generate_context!())
         .expect("failed to run tauri application");
 }

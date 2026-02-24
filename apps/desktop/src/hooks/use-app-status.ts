@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { getAppStatus, triggerSync } from "../lib/tauri";
-import type { AppStatusDto, TriggerSyncResultDto } from "../types";
+import { getAppStatus, startUserService, triggerSync } from "../lib/tauri";
+import type {
+  AppStatusDto,
+  StartServiceResultDto,
+  TriggerSyncResultDto,
+} from "../types";
 
 const POLL_INTERVAL_MS = 5000;
 
@@ -45,6 +49,12 @@ export function useAppStatus() {
     [refresh],
   );
 
+  const runStartService = useCallback(async () => {
+    const result: StartServiceResultDto = await startUserService();
+    await refresh();
+    return result;
+  }, [refresh]);
+
   const canTriggerSync = useMemo(() => {
     if (!status) {
       return false;
@@ -53,13 +63,23 @@ export function useAppStatus() {
     return status.service_running && !status.sync.sync_in_progress;
   }, [status]);
 
+  const canStartService = useMemo(() => {
+    if (!status) {
+      return false;
+    }
+
+    return status.service_installed && !status.service_running;
+  }, [status]);
+
   return {
     status,
     loading,
     error,
     lastAction,
     canTriggerSync,
+    canStartService,
     refresh,
     runAction,
+    runStartService,
   };
 }

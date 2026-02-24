@@ -31,3 +31,14 @@ export type TriggerSyncResultDto = {
   accepted: boolean;
   reason: TriggerReason;
 };
+
+export type StartServiceReason =
+  | "started"
+  | "already_running"
+  | "service_not_installed"
+  | "start_failed";
+
+export type StartServiceResultDto = {
+  started: boolean;
+  reason: StartServiceReason;
+};

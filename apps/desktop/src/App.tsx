@@ -4,7 +4,15 @@ import { StatusCard } from "./components/status-card";
 import { useAppStatus } from "./hooks/use-app-status";
 
 export default function App() {
-  const { status, loading, error, canTriggerSync, runAction } = useAppStatus();
+  const {
+    status,
+    loading,
+    error,
+    canTriggerSync,
+    canStartService,
+    runAction,
+    runStartService,
+  } = useAppStatus();
 
   return (
     <main className="min-h-screen bg-slate-950 p-4 text-slate-100 sm:p-6">
@@ -34,7 +42,10 @@ export default function App() {
             <StatusCard status={status} />
             <PathCard status={status} />
             <ActionsCard
-              disabled={!canTriggerSync}
+              serviceInstalled={status.service_installed}
+              startServiceDisabled={!canStartService}
+              syncDisabled={!canTriggerSync}
+              onStartService={runStartService}
               onFullResync={() => runAction("full_resync")}
               onResync={() => runAction("resync")}
             />

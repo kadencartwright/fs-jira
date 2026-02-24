@@ -36,13 +36,20 @@ cargo build --locked
 
 ## Install
 
-Install the binary from this repository and bootstrap a default config in the runtime lookup path:
+Install the CLI, build/install the desktop UI launcher, and bootstrap a default config in the runtime lookup path:
 
 ```bash
 just install
 ```
 
-`just install` is non-destructive for config bootstrap. If `config.toml` already exists at the resolved destination, install exits with an explicit refusal instead of overwriting it.
+`just install` now also:
+
+- builds the desktop UI from `apps/desktop`
+- installs desktop binary at `~/.local/bin/fs-jira-desktop`
+- Linux: creates desktop entry at `${XDG_DATA_HOME:-~/.local/share}/applications/fs-jira-desktop.desktop`
+- macOS: creates app bundle at `~/Applications/fs-jira Desktop.app`
+
+Config bootstrap remains non-destructive. If `config.toml` already exists at the resolved destination, install keeps going and skips writing a new config file.
 
 Raw Cargo alternative:
 
@@ -162,7 +169,7 @@ cat /tmp/fs-jira-mnt/workspaces/default/PROJ-123.md
 grep -R "in_progress" /tmp/fs-jira-mnt/workspaces
 ```
 
-The filesystem is mounted read-only. Writes should fail.
+The filesystem is effectively read-only for issue content. The only supported writes are sync triggers to `.sync_meta/manual_refresh` and `.sync_meta/full_refresh`.
 
 Notes:
 - `cache.db_path` enables persistent issue markdown cache (SQLite).
@@ -263,7 +270,7 @@ umount /tmp/fs-jira-mnt
 
 The repository includes an additive desktop control UI at `apps/desktop` for Linux tray / macOS menubar status and sync actions.
 
-Desktop prerequisites:
+Desktop prerequisites (required by `just install`):
 
 - Node.js `20.12.2`
 - Rust `1.84.0`
@@ -275,6 +282,11 @@ Install and run:
 npm --prefix apps/desktop ci
 npm --prefix apps/desktop run tauri:dev
 ```
+
+After `just install`, launch the desktop UI with:
+
+- Linux: app launcher entry `fs-jira Desktop` (or `~/.local/bin/fs-jira-desktop`)
+- macOS: `~/Applications/fs-jira Desktop.app`
 
 Desktop checks:
 

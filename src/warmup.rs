@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use regex::Regex;
+
 use crate::cache::InMemoryCache;
 use crate::jira::JiraClient;
 use crate::logging;
@@ -67,20 +69,23 @@ pub fn sync_issues(
             cache.get_sync_cursor(workspace)
         };
 
+        let (base_filter, base_order) = split_jql_order_by(base_jql);
         let jql = match &cursor {
             Some(since) => {
                 logging::info(format!(
                     "incremental sync for workspace {} since {}",
                     workspace, since
                 ));
+                let order_clause =
+                    base_order.unwrap_or_else(|| "ORDER BY updated DESC".to_string());
                 format!(
-                    "({}) AND updated > \"{}\" ORDER BY updated DESC",
-                    base_jql, since
+                    "({}) AND updated > \"{}\" {}",
+                    base_filter, since, order_clause
                 )
             }
             None => {
                 logging::info(format!("initial full sync for workspace {}", workspace));
-                format!("({})", base_jql)
+                base_jql.trim().to_string()
             }
         };
 
@@ -178,4 +183,40 @@ pub fn sync_issues(
     }
 
     result
+}
+
+fn split_jql_order_by(jql: &str) -> (String, Option<String>) {
+    let order_re = Regex::new(r"(?i)\border\s+by\b").expect("valid order by regex");
+    let trimmed = jql.trim();
+
+    if let Some(matched) = order_re.find(trimmed) {
+        let filter = trimmed[..matched.start()].trim().to_string();
+        let order = trimmed[matched.start()..].trim().to_string();
+        if filter.is_empty() {
+            (trimmed.to_string(), None)
+        } else {
+            (filter, Some(order))
+        }
+    } else {
+        (trimmed.to_string(), None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_jql_order_by;
+
+    #[test]
+    fn split_jql_order_by_extracts_order_clause() {
+        let (filter, order) = split_jql_order_by("project in (DEVO, DATA) ORDER BY updated DESC");
+        assert_eq!(filter, "project in (DEVO, DATA)");
+        assert_eq!(order.as_deref(), Some("ORDER BY updated DESC"));
+    }
+
+    #[test]
+    fn split_jql_order_by_without_order_clause_keeps_query() {
+        let (filter, order) = split_jql_order_by("project = DEVO");
+        assert_eq!(filter, "project = DEVO");
+        assert!(order.is_none());
+    }
 }

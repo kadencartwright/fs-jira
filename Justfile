@@ -158,19 +158,63 @@ service-uninstall:
 
 install:
     cargo install --path . --locked
-    if [ -n "${XDG_CONFIG_HOME:-}" ]; then \
-      config_dir="${XDG_CONFIG_HOME}/fs-jira"; \
-    elif [ -n "${HOME:-}" ]; then \
-      config_dir="${HOME}/.config/fs-jira"; \
-    else \
-      echo "failed to resolve config path: HOME is not set and XDG_CONFIG_HOME is unset" >&2; \
+    if [ -z "${HOME:-}" ]; then \
+      echo "HOME is not set" >&2; \
       exit 1; \
-    fi; \
+    fi
+    config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fs-jira"; \
     mkdir -p "$config_dir"; \
     config_path="$config_dir/config.toml"; \
     if [ -e "$config_path" ]; then \
-      echo "refusing to overwrite existing config: $config_path" >&2; \
+      echo "config already exists, skipping bootstrap: $config_path"; \
+    fi
+    if ! command -v npm >/dev/null 2>&1; then \
+      echo "npm is required to install the desktop app; install Node.js and retry" >&2; \
+      exit 1; \
+    fi
+    npm --prefix apps/desktop ci
+    npm --prefix apps/desktop run tauri:build -- --no-bundle
+    desktop_bin="apps/desktop/src-tauri/target/release/fs-jira-desktop"; \
+    if [ ! -x "$desktop_bin" ]; then \
+      echo "desktop binary not found at $desktop_bin" >&2; \
       exit 1; \
     fi; \
-    cp config.example.toml "$config_path"; \
-    echo "created default config: $config_path"
+    local_bin_dir="$HOME/.local/bin"; \
+    mkdir -p "$local_bin_dir"; \
+    cp "$desktop_bin" "$local_bin_dir/fs-jira-desktop"; \
+    chmod +x "$local_bin_dir/fs-jira-desktop"; \
+    os_name="$(uname -s)"; \
+    if [ "$os_name" = "Linux" ]; then \
+      data_home="${XDG_DATA_HOME:-$HOME/.local/share}"; \
+      icon_dir="$data_home/icons/hicolor/256x256/apps"; \
+      desktop_dir="$data_home/applications"; \
+      desktop_file="$desktop_dir/fs-jira-desktop.desktop"; \
+      legacy_desktop_file="$desktop_dir/com.fs-jira.desktop.desktop"; \
+      mkdir -p "$icon_dir" "$desktop_dir"; \
+      rm -f "$legacy_desktop_file"; \
+      cp apps/desktop/src-tauri/icons/icon.png "$icon_dir/fs-jira-desktop.png"; \
+      DESKTOP_FILE="$desktop_file" DESKTOP_BIN="$local_bin_dir/fs-jira-desktop" python -c 'import os,pathlib; p=pathlib.Path(os.environ["DESKTOP_FILE"]); p.write_text("[Desktop Entry]\nType=Application\nName=fs-jira Desktop\nComment=fs-jira service control panel\nExec=\"{}\"\nIcon=fs-jira-desktop\nTerminal=false\nCategories=Development;Utility;\nStartupNotify=true\n".format(os.environ["DESKTOP_BIN"]))'; \
+      chmod 644 "$desktop_file"; \
+      update-desktop-database "$desktop_dir" >/dev/null 2>&1 || true; \
+      echo "installed desktop entry: $desktop_file"; \
+    elif [ "$os_name" = "Darwin" ]; then \
+      app_dir="$HOME/Applications/fs-jira Desktop.app"; \
+      contents_dir="$app_dir/Contents"; \
+      macos_dir="$contents_dir/MacOS"; \
+      resources_dir="$contents_dir/Resources"; \
+      info_plist="$contents_dir/Info.plist"; \
+      launcher_script="$macos_dir/fs-jira-desktop"; \
+      mkdir -p "$macos_dir" "$resources_dir"; \
+      cp "$local_bin_dir/fs-jira-desktop" "$resources_dir/fs-jira-desktop-bin"; \
+      cp apps/desktop/src-tauri/icons/icon.png "$resources_dir/icon.png"; \
+      LAUNCHER_SCRIPT="$launcher_script" RESOURCES_DIR="$resources_dir" python -c 'import os,pathlib; p=pathlib.Path(os.environ["LAUNCHER_SCRIPT"]); p.write_text("#!/bin/bash\nexec \\\"{}/fs-jira-desktop-bin\\\" \\\"$@\\\"\n".format(os.environ["RESOURCES_DIR"])); p.chmod(0o755)'; \
+      INFO_PLIST="$info_plist" python -c 'import os,pathlib; p=pathlib.Path(os.environ["INFO_PLIST"]); p.write_text("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict>\n  <key>CFBundleDisplayName</key>\n  <string>fs-jira Desktop</string>\n  <key>CFBundleExecutable</key>\n  <string>fs-jira-desktop</string>\n  <key>CFBundleIdentifier</key>\n  <string>com.fs-jira.desktop</string>\n  <key>CFBundleName</key>\n  <string>fs-jira Desktop</string>\n  <key>CFBundlePackageType</key>\n  <string>APPL</string>\n  <key>CFBundleShortVersionString</key>\n  <string>0.1.0</string>\n  <key>CFBundleVersion</key>\n  <string>0.1.0</string>\n  <key>LSMinimumSystemVersion</key>\n  <string>12.0</string>\n</dict>\n</plist>\n")'; \
+      echo "installed macOS app bundle: $app_dir"; \
+    else \
+      echo "desktop app launcher setup skipped (unsupported OS: $os_name)"; \
+    fi; \
+    config_path="${XDG_CONFIG_HOME:-$HOME/.config}/fs-jira/config.toml"; \
+    if [ ! -e "$config_path" ]; then \
+      cp config.example.toml "$config_path"; \
+      echo "created default config: $config_path"; \
+    fi

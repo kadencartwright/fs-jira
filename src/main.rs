@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -247,7 +248,6 @@ fn mount_options() -> Vec<MountOption> {
     let mut options = vec![
         MountOption::FSName("fs-jira".to_string()),
         MountOption::DefaultPermissions,
-        MountOption::RO,
     ];
 
     if cfg!(target_os = "macos") {
@@ -257,7 +257,7 @@ fn mount_options() -> Vec<MountOption> {
     options
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cli = parse_cli_args(std::env::args_os())
         .map_err(|err| -> Box<dyn std::error::Error> { err.into() })?;
 
@@ -369,25 +369,106 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&sync_state),
     );
 
-    let fs = JiraFuseFs::new(
-        unsafe { libc::geteuid() },
-        unsafe { libc::getegid() },
-        workspaces.clone(),
-        Arc::clone(&jira),
-        Arc::clone(&cache),
-        sync_budget,
-        Arc::clone(&sync_state),
-    );
-
-    let mut config = Config::default();
-    config.mount_options.extend(mount_options());
-
     logging::info(format!(
         "mounting filesystem at {}",
         mountpoint_path.display()
     ));
-    fuser::mount2(fs, mountpoint_path, &config)?;
+
+    let uid = unsafe { libc::geteuid() };
+    let gid = unsafe { libc::getegid() };
+    let mount_once = || -> std::io::Result<()> {
+        let fs = JiraFuseFs::new(
+            uid,
+            gid,
+            workspaces.clone(),
+            Arc::clone(&jira),
+            Arc::clone(&cache),
+            sync_budget,
+            Arc::clone(&sync_state),
+        );
+
+        let mut config = Config::default();
+        config.mount_options.extend(mount_options());
+        fuser::mount2(fs, &mountpoint_path, &config)
+    };
+
+    match mount_once() {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            logging::warn(format!(
+                "mountpoint {} is already mounted; attempting cleanup",
+                mountpoint_path.display()
+            ));
+            if cleanup_mountpoint(&mountpoint_path) {
+                logging::info(format!(
+                    "cleanup succeeded for {}; retrying mount",
+                    mountpoint_path.display()
+                ));
+                mount_once()?;
+            } else {
+                return Err(error.into());
+            }
+        }
+        Err(error) => return Err(error.into()),
+    }
+
     Ok(())
+}
+
+fn cleanup_mountpoint(mountpoint: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        return run_cleanup_commands(
+            mountpoint,
+            &[&["fusermount3", "-u"], &["fusermount", "-u"], &["umount"]],
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return run_cleanup_commands(mountpoint, &[&["umount"]]);
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = mountpoint;
+        false
+    }
+}
+
+fn run_cleanup_commands(mountpoint: &Path, commands: &[&[&str]]) -> bool {
+    for command in commands {
+        if command.is_empty() {
+            continue;
+        }
+
+        let program = command[0];
+        let mut process = Command::new(program);
+        if command.len() > 1 {
+            process.args(&command[1..]);
+        }
+        process
+            .arg(mountpoint)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+
+        match process.status() {
+            Ok(status) if status.success() => return true,
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => continue,
+        }
+    }
+
+    false
+}
+
+fn main() {
+    if let Err(error) = run() {
+        logging::error(format!("{error:?}"));
+        std::process::exit(1);
+    }
 }
 
 #[cfg(test)]
@@ -402,8 +483,7 @@ mod tests {
             .iter()
             .any(|option| matches!(option, MountOption::FSName(name) if name == "fs-jira")));
         assert!(options.contains(&MountOption::DefaultPermissions));
-        assert!(options.contains(&MountOption::RO));
-        assert!(!options.contains(&MountOption::RW));
+        assert!(!options.contains(&MountOption::RO));
     }
 
     #[test]

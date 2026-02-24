@@ -1,9 +1,12 @@
 import { useState } from "react";
-import type { TriggerSyncResultDto } from "../types";
+import type { StartServiceResultDto, TriggerSyncResultDto } from "../types";
 import { FullResyncDialog } from "./full-resync-dialog";
 
 type Props = {
-  disabled: boolean;
+  serviceInstalled: boolean;
+  syncDisabled: boolean;
+  startServiceDisabled: boolean;
+  onStartService: () => Promise<StartServiceResultDto>;
   onResync: () => Promise<TriggerSyncResultDto>;
   onFullResync: () => Promise<TriggerSyncResultDto>;
 };
@@ -25,16 +28,38 @@ function mapReason(reason: TriggerSyncResultDto["reason"]): string {
   }
 }
 
-export function ActionsCard({ disabled, onResync, onFullResync }: Props) {
+function mapStartReason(reason: StartServiceResultDto["reason"]): string {
+  switch (reason) {
+    case "started":
+      return "service started";
+    case "already_running":
+      return "service already running";
+    case "service_not_installed":
+      return "service is not installed";
+    case "start_failed":
+      return "failed to start service";
+    default:
+      return reason;
+  }
+}
+
+export function ActionsCard({
+  serviceInstalled,
+  syncDisabled,
+  startServiceDisabled,
+  onStartService,
+  onResync,
+  onFullResync,
+}: Props) {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
-  const run = async (action: () => Promise<TriggerSyncResultDto>) => {
+  const run = async (action: () => Promise<string>) => {
     setBusy(true);
     try {
-      const result = await action();
-      setMessage(mapReason(result.reason));
+      const nextMessage = await action();
+      setMessage(nextMessage);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "action failed");
     } finally {
@@ -50,10 +75,26 @@ export function ActionsCard({ disabled, onResync, onFullResync }: Props) {
         </h2>
         <div className="flex flex-wrap gap-2">
           <button
-            className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-            disabled={disabled || busy}
+            className="rounded-md bg-blue-500 px-3 py-2 text-sm font-medium text-white hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+            disabled={startServiceDisabled || busy}
             onClick={() => {
-              void run(onResync);
+              void run(async () => {
+                const result = await onStartService();
+                return mapStartReason(result.reason);
+              });
+            }}
+            type="button"
+          >
+            Start Service
+          </button>
+          <button
+            className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+            disabled={syncDisabled || busy}
+            onClick={() => {
+              void run(async () => {
+                const result = await onResync();
+                return mapReason(result.reason);
+              });
             }}
             type="button"
           >
@@ -61,7 +102,7 @@ export function ActionsCard({ disabled, onResync, onFullResync }: Props) {
           </button>
           <button
             className="rounded-md bg-danger px-3 py-2 text-sm font-medium text-white hover:bg-red-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-            disabled={disabled || busy}
+            disabled={syncDisabled || busy}
             onClick={() => {
               setDialogOpen(true);
             }}
@@ -70,7 +111,20 @@ export function ActionsCard({ disabled, onResync, onFullResync }: Props) {
             Full Resync
           </button>
         </div>
-        {message ? <p className="mt-3 text-xs text-slate-400">{message}</p> : null}
+        {!serviceInstalled ? (
+          <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-950/35 p-3 text-xs text-amber-200">
+            <p className="font-semibold">Service is not installed yet</p>
+            <p className="mt-1 text-amber-100/90">
+              Install and enable it from the repository root:
+            </p>
+            <p className="mt-1 font-mono text-amber-100">
+              just service-install && just service-enable
+            </p>
+          </div>
+        ) : null}
+        {message ? (
+          <p className="mt-3 text-xs text-slate-400">{message}</p>
+        ) : null}
       </section>
 
       <FullResyncDialog
@@ -79,7 +133,10 @@ export function ActionsCard({ disabled, onResync, onFullResync }: Props) {
         }}
         onConfirm={() => {
           setDialogOpen(false);
-          void run(onFullResync);
+          void run(async () => {
+            const result = await onFullResync();
+            return mapReason(result.reason);
+          });
         }}
         open={dialogOpen}
       />

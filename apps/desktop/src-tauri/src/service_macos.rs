@@ -42,6 +42,74 @@ pub fn probe_service() -> Result<ServiceProbe, ServiceProbeError> {
     })
 }
 
+pub fn start_service() -> Result<(), ServiceProbeError> {
+    let uid = nix_like_uid();
+    let domain = format!("gui/{uid}");
+    let label_target = format!("{domain}/{LAUNCHD_LABEL}");
+
+    let mut kickstart = Command::new("launchctl");
+    kickstart
+        .args(["kickstart", "-k", &label_target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let kickstart_output = run_command_with_timeout(kickstart, Duration::from_secs(5))?;
+    if kickstart_output.status_ok {
+        return Ok(());
+    }
+
+    let plist_path = resolve_plist_path();
+    if !plist_path.exists() {
+        return Err(ServiceProbeError {
+            kind: ServiceProbeErrorKind::NotInstalled,
+            message: format!(
+                "launchd plist not found at {}; install service first",
+                plist_path.display()
+            ),
+        });
+    }
+
+    let plist_path_str = plist_path.to_string_lossy().to_string();
+    let mut bootstrap = Command::new("launchctl");
+    bootstrap
+        .args(["bootstrap", &domain, &plist_path_str])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let bootstrap_output = run_command_with_timeout(bootstrap, Duration::from_secs(5))?;
+    if !bootstrap_output.status_ok {
+        let lowered = bootstrap_output.stderr.to_ascii_lowercase();
+        let already_bootstrapped = lowered.contains("already loaded") || lowered.contains("in use");
+        if already_bootstrapped {
+            // Continue to kickstart when the service is already loaded.
+        } else {
+            return Err(ServiceProbeError {
+                kind: ServiceProbeErrorKind::Unreachable,
+                message: format!(
+                    "failed to bootstrap {}: {}",
+                    LAUNCHD_LABEL, bootstrap_output.stderr
+                ),
+            });
+        }
+    }
+
+    let mut retry_kickstart = Command::new("launchctl");
+    retry_kickstart
+        .args(["kickstart", "-k", &label_target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let retry_output = run_command_with_timeout(retry_kickstart, Duration::from_secs(5))?;
+    if retry_output.status_ok {
+        Ok(())
+    } else {
+        return Err(ServiceProbeError {
+            kind: ServiceProbeErrorKind::Unreachable,
+            message: format!("failed to start {}: {}", LAUNCHD_LABEL, retry_output.stderr),
+        });
+    }
+}
+
 fn resolve_plist_path() -> PathBuf {
     let home = std::env::var_os("HOME").unwrap_or_default();
     PathBuf::from(home)
