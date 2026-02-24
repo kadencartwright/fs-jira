@@ -4,6 +4,13 @@ Read-only Rust FUSE filesystem that exposes Jira issues as markdown files.
 
 <img src="apps/desktop/src-tauri/icons/icon.png" width="500" alt="Giraffe logo made of tickets">
 
+## TLDR
+- clone the repo
+- make sure [just](https://github.com/casey/just) is installed
+- run
+  - just install     
+  - just service-start
+
 ## Prerequisites
 
 - Rust toolchain (`rustup`, `cargo`)
