@@ -32,13 +32,30 @@ export type TriggerSyncResultDto = {
   reason: TriggerReason;
 };
 
-export type StartServiceReason =
+export type ServiceActionReason =
   | "started"
-  | "already_running"
+  | "restarted"
   | "service_not_installed"
-  | "start_failed";
+  | "action_failed";
 
-export type StartServiceResultDto = {
-  started: boolean;
-  reason: StartServiceReason;
+export type ServiceActionResultDto = {
+  ok: boolean;
+  reason: ServiceActionReason;
+};
+
+export type LogLineDto = {
+  ts: string | null;
+  source: string;
+  line: string;
+};
+
+export type WorkspaceJqlInputDto = {
+  name: string;
+  jql: string;
+};
+
+export type WorkspaceJqlValidationDto = {
+  name: string;
+  valid: boolean;
+  error: string | null;
 };

@@ -1,8 +1,11 @@
 use crate::errors::{run_command_with_timeout, ServiceProbeError, ServiceProbeErrorKind};
-use crate::ServiceProbe;
+use crate::{LogBufferState, ServiceProbe};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+use std::thread;
 use std::time::Duration;
 
 const LAUNCHD_LABEL: &str = "com.fs-jira.mount";
@@ -108,6 +111,101 @@ pub fn start_service() -> Result<(), ServiceProbeError> {
             message: format!("failed to start {}: {}", LAUNCHD_LABEL, retry_output.stderr),
         });
     }
+}
+
+pub fn restart_service() -> Result<(), ServiceProbeError> {
+    let uid = nix_like_uid();
+    let label_target = format!("gui/{uid}/{LAUNCHD_LABEL}");
+
+    let mut command = Command::new("launchctl");
+    command
+        .args(["kickstart", "-k", &label_target])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = run_command_with_timeout(command, Duration::from_secs(5))?;
+    if output.status_ok {
+        Ok(())
+    } else {
+        let details = if output.stderr.is_empty() {
+            output.stdout
+        } else {
+            output.stderr
+        };
+        Err(ServiceProbeError {
+            kind: ServiceProbeErrorKind::Unreachable,
+            message: format!("failed to restart {}: {}", LAUNCHD_LABEL, details),
+        })
+    }
+}
+
+pub fn spawn_log_collector(logs: LogBufferState, shutdown: Arc<AtomicBool>) {
+    thread::spawn(move || {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let out_log = PathBuf::from(&home)
+            .join("Library")
+            .join("Logs")
+            .join("fs-jira.log");
+        let err_log = PathBuf::from(&home)
+            .join("Library")
+            .join("Logs")
+            .join("fs-jira.err.log");
+
+        let out_log_str = out_log.to_string_lossy().to_string();
+        let err_log_str = err_log.to_string_lossy().to_string();
+
+        let mut command = Command::new("tail");
+        command
+            .args(["-n", "0", "-F", &out_log_str, &err_log_str])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = match command.spawn() {
+            Ok(value) => value,
+            Err(error) => {
+                logs.push_line("tail", format!("failed to start log reader: {error}"));
+                return;
+            }
+        };
+
+        let Some(stdout) = child.stdout.take() else {
+            logs.push_line("tail", "log reader stdout unavailable".to_string());
+            let _ = child.kill();
+            return;
+        };
+
+        let mut source = "stdout".to_string();
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+
+        while !shutdown.load(Ordering::Relaxed) {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let trimmed = line.trim_end();
+                    if trimmed.starts_with("==>") && trimmed.ends_with("<==") {
+                        if trimmed.contains("fs-jira.err.log") {
+                            source = "stderr".to_string();
+                        } else if trimmed.contains("fs-jira.log") {
+                            source = "stdout".to_string();
+                        }
+                        continue;
+                    }
+                    logs.push_line(&source, trimmed.to_string());
+                }
+                Err(error) => {
+                    logs.push_line("tail", format!("log reader error: {error}"));
+                    break;
+                }
+            }
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+    });
 }
 
 fn resolve_plist_path() -> PathBuf {

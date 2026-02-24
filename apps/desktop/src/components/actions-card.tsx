@@ -1,12 +1,13 @@
 import { useState } from "react";
-import type { StartServiceResultDto, TriggerSyncResultDto } from "../types";
+import type { ServiceActionResultDto, TriggerSyncResultDto } from "../types";
 import { FullResyncDialog } from "./full-resync-dialog";
 
 type Props = {
+  serviceRunning: boolean;
   serviceInstalled: boolean;
   syncDisabled: boolean;
-  startServiceDisabled: boolean;
-  onStartService: () => Promise<StartServiceResultDto>;
+  serviceActionDisabled: boolean;
+  onServiceAction: () => Promise<ServiceActionResultDto>;
   onResync: () => Promise<TriggerSyncResultDto>;
   onFullResync: () => Promise<TriggerSyncResultDto>;
 };
@@ -28,26 +29,29 @@ function mapReason(reason: TriggerSyncResultDto["reason"]): string {
   }
 }
 
-function mapStartReason(reason: StartServiceResultDto["reason"]): string {
+function mapServiceActionReason(
+  reason: ServiceActionResultDto["reason"],
+): string {
   switch (reason) {
     case "started":
       return "service started";
-    case "already_running":
-      return "service already running";
+    case "restarted":
+      return "service restarted";
     case "service_not_installed":
       return "service is not installed";
-    case "start_failed":
-      return "failed to start service";
+    case "action_failed":
+      return "failed to start or restart service";
     default:
       return reason;
   }
 }
 
 export function ActionsCard({
+  serviceRunning,
   serviceInstalled,
   syncDisabled,
-  startServiceDisabled,
-  onStartService,
+  serviceActionDisabled,
+  onServiceAction,
   onResync,
   onFullResync,
 }: Props) {
@@ -76,16 +80,16 @@ export function ActionsCard({
         <div className="flex flex-wrap gap-2">
           <button
             className="rounded-md bg-blue-500 px-3 py-2 text-sm font-medium text-white hover:bg-blue-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-            disabled={startServiceDisabled || busy}
+            disabled={serviceActionDisabled || busy}
             onClick={() => {
               void run(async () => {
-                const result = await onStartService();
-                return mapStartReason(result.reason);
+                const result = await onServiceAction();
+                return mapServiceActionReason(result.reason);
               });
             }}
             type="button"
           >
-            Start Service
+            {serviceRunning ? "Restart Service" : "Start Service"}
           </button>
           <button
             className="rounded-md bg-accent px-3 py-2 text-sm font-medium text-slate-950 hover:bg-teal-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"

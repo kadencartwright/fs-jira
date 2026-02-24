@@ -1,10 +1,13 @@
 use crate::errors::{
     classify_probe_failure, run_command_with_timeout, ServiceProbeError, ServiceProbeErrorKind,
 };
-use crate::ServiceProbe;
+use crate::{LogBufferState, ServiceProbe};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{atomic::AtomicBool, atomic::Ordering, Arc};
+use std::thread;
 use std::time::Duration;
 
 const SYSTEMD_UNIT_NAME: &str = "fs-jira.service";
@@ -81,6 +84,84 @@ pub fn start_service() -> Result<(), ServiceProbeError> {
             ),
         })
     }
+}
+
+pub fn restart_service() -> Result<(), ServiceProbeError> {
+    let mut command = Command::new("systemctl");
+    command
+        .args(["--user", "restart", SYSTEMD_UNIT_NAME])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = run_command_with_timeout(command, Duration::from_secs(5))?;
+    if output.status_ok {
+        Ok(())
+    } else {
+        let kind = classify_probe_failure(&output.stderr);
+        let details = if output.stderr.is_empty() {
+            output.stdout
+        } else {
+            output.stderr
+        };
+        Err(ServiceProbeError {
+            kind,
+            message: format!(
+                "failed to restart {} via systemd --user: {}",
+                SYSTEMD_UNIT_NAME, details
+            ),
+        })
+    }
+}
+
+pub fn spawn_log_collector(logs: LogBufferState, shutdown: Arc<AtomicBool>) {
+    thread::spawn(move || {
+        let mut command = Command::new("journalctl");
+        command
+            .args([
+                "--user",
+                "-u",
+                SYSTEMD_UNIT_NAME,
+                "-f",
+                "--output=short-iso",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = match command.spawn() {
+            Ok(value) => value,
+            Err(error) => {
+                logs.push_line("journalctl", format!("failed to start log reader: {error}"));
+                return;
+            }
+        };
+
+        let Some(stdout) = child.stdout.take() else {
+            logs.push_line("journalctl", "log reader stdout unavailable".to_string());
+            let _ = child.kill();
+            return;
+        };
+
+        let mut reader = BufReader::new(stdout);
+        let mut line = String::new();
+        while !shutdown.load(Ordering::Relaxed) {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    logs.push_line("journalctl", line.trim_end().to_string());
+                }
+                Err(error) => {
+                    logs.push_line("journalctl", format!("log reader error: {error}"));
+                    break;
+                }
+            }
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+    });
 }
 
 fn resolve_unit_path() -> PathBuf {

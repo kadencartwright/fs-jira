@@ -18,3 +18,4 @@ wait-timeout = "0.2"
 shlex = "1.3"
 libc = "0.2"
 fs-jira = { path = "../../.." }
+toml = "0.8"

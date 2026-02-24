@@ -1,7 +1,19 @@
+import { useCallback, useEffect, useState } from "react";
 import { ActionsCard } from "./components/actions-card";
+import { LogsCard } from "./components/logs-card";
 import { PathCard } from "./components/path-card";
 import { StatusCard } from "./components/status-card";
+import { WorkspacesCard } from "./components/workspaces-card";
 import { useAppStatus } from "./hooks/use-app-status";
+import {
+  getSessionLogs,
+  getWorkspaceJqlConfig,
+  saveWorkspaceJqlConfig,
+  validateWorkspaceJqls,
+} from "./lib/tauri";
+import type { LogLineDto, WorkspaceJqlInputDto } from "./types";
+
+const LOG_POLL_INTERVAL_MS = 2000;
 
 export default function App() {
   const {
@@ -9,10 +21,64 @@ export default function App() {
     loading,
     error,
     canTriggerSync,
-    canStartService,
+    canRunServiceAction,
     runAction,
-    runStartService,
+    runServiceAction,
   } = useAppStatus();
+
+  const [logs, setLogs] = useState<LogLineDto[]>([]);
+  const [logsLoading, setLogsLoading] = useState(true);
+  const [logsError, setLogsError] = useState<string | null>(null);
+  const [workspaceRows, setWorkspaceRows] = useState<WorkspaceJqlInputDto[]>(
+    [],
+  );
+  const [workspaceLoading, setWorkspaceLoading] = useState(true);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+
+  const refreshLogs = useCallback(async () => {
+    try {
+      const nextLogs = await getSessionLogs();
+      setLogs(nextLogs);
+      setLogsError(null);
+    } catch (nextError) {
+      setLogsError(
+        nextError instanceof Error ? nextError.message : "failed to fetch logs",
+      );
+    } finally {
+      setLogsLoading(false);
+    }
+  }, []);
+
+  const refreshWorkspaces = useCallback(async () => {
+    try {
+      const rows = await getWorkspaceJqlConfig();
+      setWorkspaceRows(rows);
+      setWorkspaceError(null);
+    } catch (nextError) {
+      setWorkspaceError(
+        nextError instanceof Error
+          ? nextError.message
+          : "failed to load workspace config",
+      );
+    } finally {
+      setWorkspaceLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshLogs();
+    const timer = window.setInterval(() => {
+      void refreshLogs();
+    }, LOG_POLL_INTERVAL_MS);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [refreshLogs]);
+
+  useEffect(() => {
+    void refreshWorkspaces();
+  }, [refreshWorkspaces]);
 
   return (
     <main className="min-h-screen bg-slate-950 p-4 text-slate-100 sm:p-6">
@@ -42,12 +108,24 @@ export default function App() {
             <StatusCard status={status} />
             <PathCard status={status} />
             <ActionsCard
+              serviceRunning={status.service_running}
               serviceInstalled={status.service_installed}
-              startServiceDisabled={!canStartService}
+              serviceActionDisabled={!canRunServiceAction}
               syncDisabled={!canTriggerSync}
-              onStartService={runStartService}
+              onServiceAction={runServiceAction}
               onFullResync={() => runAction("full_resync")}
               onResync={() => runAction("resync")}
+            />
+            <LogsCard error={logsError} loading={logsLoading} logs={logs} />
+            <WorkspacesCard
+              initialRows={workspaceRows}
+              loadError={workspaceError}
+              loading={workspaceLoading}
+              onSave={async (rows) => {
+                await saveWorkspaceJqlConfig(rows);
+                await refreshWorkspaces();
+              }}
+              onValidate={validateWorkspaceJqls}
             />
 
             {status.errors.length > 0 ? (
